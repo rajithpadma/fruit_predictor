@@ -1,76 +1,71 @@
 import streamlit as st
-import cv2
 import numpy as np
-from PIL import Image
+import cv2
 import random
+from PIL import Image
+from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
+from tensorflow.keras.models import Model
+from tensorflow.keras.preprocessing import image
 import os
-from skimage.metrics import structural_similarity as ssim
-from streamlit_drawable_canvas import st_canvas
 
-st.set_page_config(page_title="AI Drawing Judge", page_icon="🎨", layout="centered")
+# --- Title ---
+st.title("🎨 AI Drawing Accuracy Game")
+st.write("Try to replicate the given image. The AI will score how close your drawing is!")
 
-st.title("🎨 AI Drawing Judge Game")
-st.write("Replicate the fruit shown below! Draw it using your mouse — the AI will score your accuracy 🍎")
+# --- Load model (pretrained feature extractor) ---
+@st.cache_resource
+def load_model():
+    base_model = MobileNetV2(weights='imagenet', include_top=False, pooling='avg')
+    return base_model
 
-# List all image files in the same folder as this script
-image_extensions = [".jpg", ".jpeg", ".png"]
-available_images = [f for f in os.listdir() if os.path.splitext(f)[1].lower() in image_extensions]
+model = load_model()
 
-if not available_images:
-    st.error("⚠️ No image files found in the folder! Please add some fruit images (jpg/png).")
-    st.stop()
+# --- Load reference images ---
+img_dir = "reference_images"
+img_list = os.listdir(img_dir)
+selected_image = random.choice(img_list)
 
-# Pick a random fruit image for each session
-if "target_image" not in st.session_state:
-    st.session_state.target_image = random.choice(available_images)
+st.subheader("🖼 Reference Image:")
+st.image(os.path.join(img_dir, selected_image), width=300, caption="Draw this!")
 
-# Option to switch to a new fruit
-if st.button("🔄 New Fruit"):
-    st.session_state.target_image = random.choice(available_images)
+# --- Upload your drawing ---
+uploaded = st.file_uploader("Upload your drawing (JPG or PNG):", type=["jpg", "jpeg", "png"])
 
-# Load target image
-target_path = st.session_state.target_image
-target_img = Image.open(target_path).convert("RGB")
+if uploaded is not None:
+    user_img = Image.open(uploaded).convert('RGB')
+    st.image(user_img, width=300, caption="Your Drawing")
 
-st.image(target_img, caption=f"🖼️ Draw this: {os.path.splitext(st.session_state.target_image)[0].capitalize()}", use_container_width=True)
-
-# Canvas for drawing
-st.write("✏️ Draw your version below:")
-canvas_result = st_canvas(
-    fill_color="rgba(255, 255, 255, 1)",  # White background
-    stroke_width=6,
-    stroke_color="#000000",
-    background_color="#FFFFFF",
-    width=300,
-    height=300,
-    drawing_mode="freedraw",
-    key="canvas",
-)
-
-# Evaluate the drawing when user clicks the button
-if st.button("🏁 Submit Drawing"):
-    if canvas_result.image_data is not None:
-        # Convert canvas to PIL Image
-        user_img = Image.fromarray((canvas_result.image_data[:, :, :3]).astype("uint8"))
-
-        # Resize both to same dimensions
-        target_resized = target_img.resize((224, 224))
-        user_resized = user_img.resize((224, 224))
-
-        # Convert to grayscale for comparison
-        img1 = np.array(target_resized.convert("L"))
-        img2 = np.array(user_resized.convert("L"))
-
-        # Compute structural similarity (SSIM)
-        score, diff = ssim(img1, img2, full=True)
-        st.subheader(f"🧠 AI Accuracy Score: {score * 100:.2f}%")
-
-        # Feedback
-        if score > 0.85:
-            st.success("Amazing! That looks just like it 🎯")
-        elif score > 0.6:
-            st.info("Nice work! It’s quite similar 🍏")
+    # --- Preprocess both images ---
+    def preprocess(img_path_or_array):
+        if isinstance(img_path_or_array, str):
+            img = image.load_img(img_path_or_array, target_size=(224, 224))
+            img_array = image.img_to_array(img)
         else:
-            st.warning("Keep practicing! Try to match the shape better 🍌")
+            img = img_path_or_array.resize((224, 224))
+            img_array = np.array(img)
+        img_array = np.expand_dims(img_array, axis=0)
+        return preprocess_input(img_array)
+
+    ref_img = preprocess(os.path.join(img_dir, selected_image))
+    user_img_proc = preprocess(user_img)
+
+    # --- Extract features ---
+    ref_feat = model.predict(ref_img)
+    user_feat = model.predict(user_img_proc)
+
+    # --- Compute similarity ---
+    similarity = np.dot(ref_feat, user_feat.T) / (np.linalg.norm(ref_feat) * np.linalg.norm(user_feat))
+    accuracy = round(float(similarity) * 100, 2)
+
+    st.success(f"🎯 AI Accuracy Score: **{accuracy}%**")
+
+    if accuracy > 80:
+        st.balloons()
+        st.write("Excellent drawing! 🥳")
+    elif accuracy > 50:
+        st.write("Pretty good! Keep practicing 👏")
     else:
-        st.warning("Please draw something before submitting!")
+        st.write("Needs improvement — try again! ✏️")
+
+st.markdown("---")
+st.info("Tip: Try drawing using Paint, save it, and upload to see your AI accuracy score!")
